@@ -48,6 +48,7 @@ from orbax.checkpoint._src.handlers import composite_checkpoint_handler
 from orbax.checkpoint._src.handlers import handler_registration
 from orbax.checkpoint._src.handlers import json_checkpoint_handler
 from orbax.checkpoint._src.handlers import proto_checkpoint_handler
+from orbax.checkpoint._src.handlers import pytree_checkpoint_handler as pytree_handler_lib
 from orbax.checkpoint._src.logging import abstract_logger
 from orbax.checkpoint._src.logging import standard_logger
 from orbax.checkpoint._src.logging import step_statistics
@@ -369,6 +370,16 @@ class CheckpointManagerOptions:
     useful to improve init performance when there are O(1k) or more existing
     checkpoint steps present and checkpoint info properties like `time` and
     `metrics` are not needed.
+  save_device_host_concurrent_gb: max concurrent GB allowed to be transferred
+    from device to host memory at once when saving, defined on a per-worker
+    basis. When the limit is reached, arrays must be finished writing to the
+    checkpoint before a new array can start being transferred. This is
+    propagated to all ``PyTreeCheckpointHandler`` instances managed by the
+    ``CheckpointManager``. Set to a small value (e.g. 4) when running under a
+    Pathways proxy with limited host memory to prevent OOM. ``None`` means no
+    throttling. Can be set to ``"auto"`` to enable the Memory Regulator.
+    Individual handlers may override this value if they are constructed with
+    ``save_device_host_concurrent_gb`` explicitly set.
   """
 
   save_interval_steps: int = 1
@@ -410,6 +421,7 @@ class CheckpointManagerOptions:
   enable_should_save_is_saving_in_progress_check: bool = True
   enable_per_process_directory_creation: bool = False
   lightweight_initialize: bool = False
+  save_device_host_concurrent_gb: int | str | None = None
 
   def __post_init__(self):
     step_name_format_single_host_load_and_broadcast = (
@@ -969,6 +981,29 @@ class CheckpointManager(AbstractCheckpointManager, epy.ContextManager):
           temporary_path_class=options.temporary_path_class,
       )
 
+  def _apply_save_device_host_concurrent_gb(
+      self,
+      item_handlers: dict[str, Optional[CheckpointHandler]],
+      options: CheckpointManagerOptions,
+  ) -> None:
+    """Propagates save_device_host_concurrent_gb to PyTreeCheckpointHandlers.
+
+    Only applies the option to handlers that were not already constructed with
+    an explicit save_device_host_concurrent_gb value.
+    """
+    if options.save_device_host_concurrent_gb is None:
+      return
+    for handler in item_handlers.values():
+      if isinstance(
+          handler, pytree_handler_lib.PyTreeCheckpointHandler
+      ) and handler._save_device_host_concurrent_bytes is None:
+        handler._save_device_host_concurrent_bytes = (
+            pytree_handler_lib._concurrent_bytes(
+                options.save_device_host_concurrent_gb,
+                use_default_if_none=False,
+            )
+        )
+
   def _configure_checkpointer_legacy_init(
       self,
       checkpointers: Union[AbstractCheckpointer, CheckpointersDict],
@@ -1027,6 +1062,7 @@ class CheckpointManager(AbstractCheckpointManager, epy.ContextManager):
       )
 
     item_handlers[METRIC_ITEM_NAME] = self._metrics_handler
+    self._apply_save_device_host_concurrent_gb(item_handlers, options)
     if options.async_options is None:
       options.async_options = (
           AsyncOptions(timeout_secs=async_timeout)
@@ -1087,6 +1123,7 @@ class CheckpointManager(AbstractCheckpointManager, epy.ContextManager):
             f'Found {item_name} in `checkpointers`; this is a reserved key.'
         )
     all_item_handlers[METRIC_ITEM_NAME] = self._metrics_handler
+    self._apply_save_device_host_concurrent_gb(all_item_handlers, options)
     # CompositeCheckpointHandler defers per-item handler creation until
     # save/restore time.
     async_options = options.async_options or AsyncOptions()
