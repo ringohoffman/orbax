@@ -67,14 +67,12 @@ class PyTreeCheckpointer(checkpointer.Checkpointer):
 
       def _get_restore_arg(x):
         if isinstance(x, jax.ShapeDtypeStruct) and getattr(x, 'sharding', None) is not None:
-          from orbax.checkpoint import args as ocp_args
-          return ocp_args.ArrayRestore(
-              restore_args=type_handlers.ArrayRestoreArgs(
-                  restore_type=jax.Array,
-                  sharding=x.sharding,
-                  global_shape=x.shape,
-                  dtype=x.dtype,
-              )
+          from orbax.checkpoint import type_handlers
+          return type_handlers.ArrayRestoreArgs(
+              restore_type=jax.Array,
+              sharding=x.sharding,
+              global_shape=x.shape,
+              dtype=x.dtype,
           )
         return None
 
