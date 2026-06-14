@@ -47,3 +47,44 @@ class PyTreeCheckpointer(checkpointer.Checkpointer):
             primary_host=primary_host
         ),
     )
+
+  def restore(
+      self,
+      directory,
+      *args,
+      target=None,
+      partial_restore: bool = False,
+      **kwargs,
+  ):
+    """Restores a PyTree.
+    
+    If `target` is provided, it automatically constructs the necessary `PyTreeRestoreArgs`
+    to map the array shapes and shardings properly.
+    """
+    if target is not None:
+      import jax
+      from orbax.checkpoint import type_handlers
+
+      def _get_restore_arg(x):
+        if isinstance(x, jax.ShapeDtypeStruct) and getattr(x, 'sharding', None) is not None:
+          return pytree_checkpoint_handler.RestoreArgs(
+              restore_type=jax.Array,
+              sharding=x.sharding,
+              global_shape=x.shape,
+              dtype=x.dtype,
+          )
+        return None
+
+      restore_args = jax.tree_util.tree_map(
+          _get_restore_arg,
+          target,
+          is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct)
+      )
+
+      if 'args' not in kwargs:
+        kwargs['args'] = pytree_checkpoint_handler.PyTreeRestoreArgs(
+            item=target,
+            restore_args=restore_args,
+            partial_restore=partial_restore,
+        )
+    return super().restore(directory, *args, **kwargs)
