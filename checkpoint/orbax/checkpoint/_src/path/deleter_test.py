@@ -35,12 +35,15 @@ class CheckpointDeleterTest(parameterized.TestCase):
 
   @parameterized.product(
       threaded=(False, True),
+      distributed=(False, True),
       todelete_subdir=(None, 'some_delete_dir'),
   )
   def test_checkpoint_deleter_delete(
-      self, threaded, todelete_subdir
+      self, threaded, distributed, todelete_subdir
   ):
-    """Test regular CheckpointDeleter."""
+    """Test regular, threaded, and distributed CheckpointDeleter."""
+    if threaded and distributed:
+      return  # Mutually exclusive options in test matrix
     deleter = deleter_lib.create_checkpoint_deleter(
         self.ckpt_dir,
         name_format=step_lib.standard_name_format(),
@@ -48,11 +51,14 @@ class CheckpointDeleterTest(parameterized.TestCase):
         todelete_subdir=todelete_subdir,
         todelete_full_path=None,
         enable_background_delete=threaded,
+        enable_distributed_delete=distributed,
     )
 
     step = 1
     step_dir = self._get_save_diretory(step, self.ckpt_dir)
     step_dir.mkdir()
+    (step_dir / 'item1').mkdir()
+    (step_dir / 'item1' / 'tensor1').mkdir()
     self.assertTrue(step_dir.exists())
     deleter.delete(step)
     deleter.close()
@@ -65,6 +71,59 @@ class CheckpointDeleterTest(parameterized.TestCase):
       self.assertTrue((self.ckpt_dir / todelete_subdir / str(step)).exists())
 
     deleter.close()
+
+  @mock.patch('orbax.checkpoint._src.multihost.multihost.sync_global_processes')
+  @mock.patch('orbax.checkpoint._src.multihost.multihost.process_count', return_value=2)
+  def test_distributed_checkpoint_deleter_multihost_sharding(
+      self, mock_proc_count, mock_sync
+  ):
+    """Test multi-host sharding logic in DistributedCheckpointDeleter."""
+    deleter = deleter_lib.DistributedCheckpointDeleter(
+        self.ckpt_dir,
+        name_format=step_lib.standard_name_format(),
+        primary_host=0,
+    )
+    step = 42
+    step_dir = self._get_save_diretory(step, self.ckpt_dir)
+    step_dir.mkdir()
+    
+    # Create 4 tensor subdirectories
+    subdirs = [
+        step_dir / 'item1' / 't0',
+        step_dir / 'item1' / 't1',
+        step_dir / 'item2' / 't2',
+        step_dir / 'item2' / 't3',
+    ]
+    for s in subdirs:
+      s.mkdir(parents=True, exist_ok=True)
+      (s / 'data.bin').write_text('dummy')
+
+    all_subpaths = sorted([p for p in step_dir.glob('*/*')])
+    # Process 0 deletes index 0, 2
+    p0_subpaths = [p for idx, p in enumerate(all_subpaths) if idx % 2 == 0]
+    # Process 1 deletes index 1, 3
+    p1_subpaths = [p for idx, p in enumerate(all_subpaths) if idx % 2 == 1]
+
+    for p in p0_subpaths:
+      deleter._rmtree(p)
+
+    self.assertFalse((step_dir / 'item1' / 't0').exists())
+    self.assertTrue((step_dir / 'item1' / 't1').exists())
+    self.assertFalse((step_dir / 'item2' / 't2').exists())
+    self.assertTrue((step_dir / 'item2' / 't3').exists())
+
+    for p in p1_subpaths:
+      deleter._rmtree(p)
+
+    self.assertFalse((step_dir / 'item1' / 't1').exists())
+    self.assertFalse((step_dir / 'item2' / 't3').exists())
+
+    # Primary host cleanup
+    with mock.patch('orbax.checkpoint._src.multihost.multihost.process_index', return_value=0), \
+         mock.patch('orbax.checkpoint._src.multihost.multihost.is_primary_host', return_value=True):
+      deleter.delete(step)
+
+    self.assertFalse(step_dir.exists())
 
 
 class GcsRenameTest(unittest.TestCase):

@@ -42,6 +42,10 @@ _STANDARD_DELETE_DURATION = (
     '/jax/orbax/checkpoint_manager/standard_checkpoint_deleter/duration'
 )
 
+_DISTRIBUTED_DELETE_DURATION = (
+    '/jax/orbax/checkpoint_manager/distributed_checkpoint_deleter/duration'
+)
+
 
 class CheckpointDeleter(Protocol):
   """A protocol defined a CheckpointDeleter."""
@@ -299,6 +303,127 @@ class ThreadedCheckpointDeleter:
     self._standard_deleter.close()
 
 
+class DistributedCheckpointDeleter:
+  """A CheckpointDeleter that parallelizes file deletions across all multihost processes."""
+
+  def __init__(
+      self,
+      directory: epath.Path,
+      *,
+      name_format: step_lib.NameFormat[step_lib.Metadata],
+      primary_host: Optional[int] = 0,
+      todelete_subdir: Optional[str] = None,
+      todelete_full_path: Optional[str] = None,
+      duration_metric: Optional[str] = _DISTRIBUTED_DELETE_DURATION,
+  ) -> None:
+    self._primary_host = primary_host
+    self._directory = directory
+    self._todelete_subdir = todelete_subdir
+    self._todelete_full_path = todelete_full_path
+    self._name_format = name_format
+    self._duration_metric = duration_metric
+    self._standard_deleter = StandardCheckpointDeleter(
+        directory=directory,
+        name_format=name_format,
+        primary_host=primary_host,
+        todelete_subdir=todelete_subdir,
+        todelete_full_path=todelete_full_path,
+        duration_metric=duration_metric,
+    )
+
+  def _rmtree(self, path: epath.Path) -> None:
+    if gcs_utils.is_gcs_path(path):
+      gcs_utils.rmtree(path)
+    else:
+      path.rmtree()
+
+  def delete(self, step: int) -> None:
+    start = time.time()
+    try:
+      try:
+        delete_target = step_lib.find_step_path(
+            self._directory,
+            self._name_format,
+            step=step,
+            include_uncommitted=True,
+        )
+      except ValueError as e:
+        logging.warning(
+            'Unable to find the step %d for deletion or renaming, err=%s',
+            step,
+            e,
+        )
+        return
+
+      # Renaming is atomic, delegate to standard deleter if configured
+      if self._todelete_full_path is not None or self._todelete_subdir is not None:
+        self._standard_deleter.delete(step)
+        return
+
+      proc_index = multihost.process_index()
+      proc_count = multihost.process_count()
+
+      if proc_count <= 1:
+        self._standard_deleter.delete(step)
+        return
+
+      all_subpaths: List[epath.Path] = []
+      if delete_target.exists():
+        second_level = [p for p in delete_target.glob('*/*')]
+        first_level = [p for p in delete_target.glob('*')]
+        if second_level:
+          first_level_files = [p for p in first_level if p.is_file()]
+          all_subpaths = sorted(second_level) + sorted(first_level_files)
+        else:
+          all_subpaths = sorted(first_level)
+
+      if all_subpaths:
+        my_subpaths = [
+            p for idx, p in enumerate(all_subpaths) if idx % proc_count == proc_index
+        ]
+        logging.info(
+            '[process=%d/%d] Distributed deletion of step %d: deleting %d of %d subpaths.',
+            proc_index,
+            proc_count,
+            step,
+            len(my_subpaths),
+            len(all_subpaths),
+        )
+        for p in my_subpaths:
+          if p.exists():
+            if p.is_dir():
+              self._rmtree(p)
+            else:
+              p.unlink()
+
+      multihost.sync_global_processes(
+          multihost.unique_barrier_key(
+              'DistributedCheckpointDeleter:delete',
+              suffix=str(step),
+          )
+      )
+
+      if multihost.is_primary_host(self._primary_host):
+        if delete_target.exists():
+          self._rmtree(delete_target)
+          logging.info('Distributed delete finished for step %d.', step)
+
+      event_tracking.record_delete_event(delete_target)
+    finally:
+      jax.monitoring.record_event_duration_secs(
+          self._duration_metric,
+          time.time() - start,
+      )
+
+  def delete_steps(self, steps: Sequence[int]) -> None:
+    logging.info('Executing distributed deletion of steps: %s.', steps)
+    for step in steps:
+      self.delete(step)
+
+  def close(self) -> None:
+    self._standard_deleter.close()
+
+
 def create_checkpoint_deleter(
     directory: epath.Path,
     *,
@@ -307,10 +432,19 @@ def create_checkpoint_deleter(
     todelete_subdir: Optional[str] = None,
     todelete_full_path: Optional[str] = None,
     enable_background_delete: bool = False,
+    enable_distributed_delete: bool = False,
 ) -> CheckpointDeleter:
   """Creates a CheckpointDeleter."""
 
-  if enable_background_delete:
+  if enable_distributed_delete:
+    return DistributedCheckpointDeleter(
+        directory,
+        name_format=name_format,
+        primary_host=primary_host,
+        todelete_subdir=todelete_subdir,
+        todelete_full_path=todelete_full_path,
+    )
+  elif enable_background_delete:
     return ThreadedCheckpointDeleter(
         directory,
         name_format=name_format,

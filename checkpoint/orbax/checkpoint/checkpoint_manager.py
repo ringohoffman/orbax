@@ -322,6 +322,9 @@ class CheckpointManagerOptions:
     background thread, otherwise, it will be done at the end of each save.  When
     it's enabled, make sure to call CheckpointManager.close() or use context to
     make sure all old steps are deleted before exit.
+  enable_distributed_delete: If True, old checkpoint deletions will be parallelized
+    across all JAX / Pathways host processes, partitioning subpaths round-robin by
+    process index.
   read_only: If True, then checkpoints save and delete are skipped. However,
     checkpoints restore works as usual.
   enable_async_checkpointing:
@@ -400,6 +403,7 @@ class CheckpointManagerOptions:
   todelete_subdir: Optional[str] = None
   todelete_full_path: Optional[str] = None
   enable_background_delete: bool = False
+  enable_distributed_delete: bool = False
   read_only: bool = False
   enable_async_checkpointing: bool = True
   async_options: Optional[AsyncOptions] = None
@@ -926,6 +930,7 @@ class CheckpointManager(AbstractCheckpointManager, epy.ContextManager):
             todelete_subdir=self._options.todelete_subdir,
             todelete_full_path=self._options.todelete_full_path,
             enable_background_delete=self._options.enable_background_delete,
+            enable_distributed_delete=self._options.enable_distributed_delete,
         )
     )
 
