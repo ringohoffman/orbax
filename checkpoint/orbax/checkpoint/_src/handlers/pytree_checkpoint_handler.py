@@ -25,7 +25,7 @@ import dataclasses
 import json
 import re
 import typing
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypedDict, Union
 
 from absl import logging
 from etils import epath
@@ -470,6 +470,24 @@ def _concurrent_bytes(
       return None
   else:
     return concurrent_gb * 10**9
+
+
+class PyTreeCheckpointHandlerKwargs(TypedDict, total=False):
+  aggregate_filename: Optional[str]
+  save_concurrent_gb: Optional[int]
+  restore_concurrent_gb: Optional[int]
+  save_device_host_concurrent_gb: int | str | None
+  memory_limit_options: options_lib.MemoryLimitOptions | None
+  use_ocdbt: bool
+  use_zarr3: bool
+  use_compression: bool
+  multiprocessing_options: options_lib.MultiprocessingOptions
+  type_handler_registry: TypeHandlerRegistry
+  handler_impl: Optional[BasePyTreeCheckpointHandler]
+  pytree_metadata_options: tree_metadata.PyTreeMetadataOptions
+  array_metadata_validator: array_metadata_store_lib.Validator
+  enable_pinned_host_transfer: Optional[bool]
+  is_prioritized_key_fn: Optional[serialization_types.IsPrioritizedKeyFn]
 
 
 class PyTreeCheckpointHandler(

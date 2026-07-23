@@ -69,7 +69,7 @@ from orbax.checkpoint._src.handlers.composite_checkpoint_handler import Composit
 from orbax.checkpoint._src.handlers.composite_checkpoint_handler import CompositeOptions
 from orbax.checkpoint._src.handlers.json_checkpoint_handler import JsonCheckpointHandler
 from orbax.checkpoint._src.handlers.proto_checkpoint_handler import ProtoCheckpointHandler
-from orbax.checkpoint._src.handlers.pytree_checkpoint_handler import PyTreeCheckpointHandler
+from orbax.checkpoint._src.handlers.pytree_checkpoint_handler import PyTreeCheckpointHandler, PyTreeCheckpointHandlerKwargs
 from orbax.checkpoint._src.handlers.random_key_checkpoint_handler import JaxRandomKeyCheckpointHandler
 from orbax.checkpoint._src.handlers.random_key_checkpoint_handler import NumpyRandomKeyCheckpointHandler
 from orbax.checkpoint._src.handlers.standard_checkpoint_handler import StandardCheckpointHandler
