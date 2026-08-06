@@ -14,20 +14,34 @@
 
 """Shorthand for `Checkpointer(PyTreeCheckpointHandler())`."""
 
+from __future__ import annotations
+
 import contextlib
 import logging
-from typing import Optional
+from typing import Any, Optional, TYPE_CHECKING, TypeAlias, TypeGuard
 
 from etils import epath
 from orbax.checkpoint import options as options_lib
 from orbax.checkpoint._src.checkpointers import checkpointer
 from orbax.checkpoint._src.handlers import pytree_checkpoint_handler
 
+if TYPE_CHECKING:
+  import jax
+  import numpy.typing as npt
+  from jax._src.tree_util import PyTree
+  from orbax.checkpoint import type_handlers
+
+  TargetLeaf: TypeAlias = (
+      jax.ShapeDtypeStruct
+      | jax.Array
+      | npt.ArrayLike
+      | type_handlers.RestoreArgs
+  )
 
 _logger = logging.getLogger(__name__)
 
 
-def _is_ocdbt_checkpoint(directory: str) -> bool:
+def _is_ocdbt_checkpoint(directory: epath.PathLike) -> bool:
   """Returns True if `directory` contains an OCDBT manifest."""
   path = epath.Path(str(directory))
   return (path / 'manifest.ocdbt').exists()
@@ -121,12 +135,12 @@ class PyTreeCheckpointer(checkpointer.Checkpointer):
 
   def restore(
       self,
-      directory,
-      *args,
-      target=None,
+      directory: epath.PathLike,
+      *args: Any,
+      target: Optional[PyTree[TargetLeaf]] = None,
       partial_restore: bool = False,
-      **kwargs,
-  ):
+      **kwargs: Any,
+  ) -> PyTree[jax.Array]:
     """Restores a PyTree with automatic format detection.
 
     If ``target`` is provided (a tree of ``jax.ShapeDtypeStruct`` with
@@ -146,18 +160,20 @@ class PyTreeCheckpointer(checkpointer.Checkpointer):
 
     Args:
       directory: Checkpoint directory path.
-      target: Optional tree of ``jax.ShapeDtypeStruct`` describing the
-        desired output shapes and shardings.
-      partial_restore: If True, allow restoring a subset of the
-        checkpoint tree.
+      target: Optional tree of ``jax.ShapeDtypeStruct`` describing the desired
+        output shapes and shardings.
+      partial_restore: If True, allow restoring a subset of the checkpoint tree.
       **kwargs: Forwarded to ``Checkpointer.restore()``.
     """
     if target is not None:
       import jax
       from orbax.checkpoint import type_handlers
 
-      def _get_restore_arg(x):
-        if isinstance(x, jax.ShapeDtypeStruct) and getattr(x, 'sharding', None) is not None:
+      def _get_restore_arg(x: Any) -> type_handlers.ArrayRestoreArgs | None:
+        if (
+            isinstance(x, jax.ShapeDtypeStruct)
+            and getattr(x, 'sharding', None) is not None
+        ):
           return type_handlers.ArrayRestoreArgs(
               restore_type=jax.Array,
               sharding=x.sharding,
@@ -166,10 +182,11 @@ class PyTreeCheckpointer(checkpointer.Checkpointer):
           )
         return None
 
+      def _is_shape_dtype_struct(x: Any) -> TypeGuard[jax.ShapeDtypeStruct]:
+        return isinstance(x, jax.ShapeDtypeStruct)
+
       restore_args = jax.tree_util.tree_map(
-          _get_restore_arg,
-          target,
-          is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct)
+          _get_restore_arg, target, is_leaf=_is_shape_dtype_struct
       )
 
       if 'args' not in kwargs:
